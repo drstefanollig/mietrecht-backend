@@ -51,13 +51,26 @@ Antworte NUR mit einem JSON-Array, kein Markdown, kein Text davor oder danach:
 
   console.log(`[${new Date().toISOString()}] Fetching news for ${today}...`);
 
-  const msg = await anthropic.messages.create({
-    model:      "claude-sonnet-4-20250514",
-    max_tokens: 2000,
-    tools:      [{ type: "web_search_20250305", name: "web_search" }],
-    system:     systemPrompt,
-    messages:   [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
-  });
+  // Versuche zuerst mit Web Search, Fallback ohne Web Search
+  let msg;
+  try {
+    msg = await anthropic.messages.create({
+      model:    "claude-sonnet-4-6",
+      max_tokens: 2000,
+      tools:    [{ type: "web_search_20250305", name: "web_search" }],
+      system:   systemPrompt,
+      messages: [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
+    });
+    console.log("[API] Web Search aktiviert – OK");
+  } catch (webSearchErr) {
+    console.warn("[API] Web Search fehlgeschlagen, Fallback ohne Web Search:", webSearchErr.message);
+    msg = await anthropic.messages.create({
+      model:    "claude-sonnet-4-6",
+      max_tokens: 2000,
+      system:   systemPrompt,
+      messages: [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
+    });
+  }
 
   const textBlock = msg.content.find(b => b.type === "text");
   if (!textBlock) throw new Error("Kein Text-Block in API-Antwort");
@@ -102,7 +115,9 @@ app.get("/api/news", async (req, res) => {
     const news = await fetchNews(today);
     res.json({ news, cached: false, date: today });
   } catch (err) {
-    console.error("fetchNews Fehler:", err.message);
+    console.error("[FEHLER] fetchNews:", err.message);
+    if (err.status) console.error("[FEHLER] HTTP Status:", err.status);
+    if (err.error)  console.error("[FEHLER] API Error:", JSON.stringify(err.error));
     // Wenn Cache noch brauchbar (anderer Tag aber besser als nichts): zurückgeben
     if (newsCache.news.length > 0) {
       return res.json({ news: newsCache.news, cached: true, date: newsCache.date, stale: true });
