@@ -49,7 +49,7 @@ async function fetchNews(today) {
 Quellen: BGH, OLG, LG, Bundesjustizministerium, Bundesbauministerium, Mieterbund, Verbraucherzentrale, Statistisches Bundesamt, IW Köln, KfW, Haufe, NJW, dpa.
 Jede Nachricht: andere Quelle, anderes Thema.${exclusionBlock}
 
-Antworte NUR mit JSON-Array, kein Markdown:
+Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags, kein Fließtext außerhalb des Arrays:
 [{"id":"${today}_1","titel":"max 12 Wörter","zusammenfassung":"2 Sätze","details":"max 80 Wörter, konkrete Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Quellenangabe","datum":"${today}"}]`;
 
   console.log(`[${new Date().toISOString()}] API-Aufruf für ${today}...`);
@@ -87,11 +87,20 @@ Antworte NUR mit JSON-Array, kein Markdown:
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Leeres Array");
 
+  // Zitier-Tags und sonstige XML-Reste aus Textfeldern entfernen
+  function stripTags(val) {
+    if (typeof val !== "string") return val;
+    return val.replace(/<[^>]+>/g, "").trim();
+  }
   const news = parsed.map((n, i) => ({
     ...n,
-    datum:  today,
-    id:     `${today}_${i + 1}`,
-    isMock: false
+    titel:          stripTags(n.titel),
+    zusammenfassung: stripTags(n.zusammenfassung),
+    details:        stripTags(n.details),
+    quelle:         stripTags(n.quelle),
+    datum:          today,
+    id:             `${today}_${i + 1}`,
+    isMock:         false
   }));
 
   cache = {
