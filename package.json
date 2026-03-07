@@ -1,0 +1,15 @@
+{
+  "name": "mietrecht-news-backend",
+  "version": "2.0.0",
+  "description": "Mietrecht News Backend – schlanke Version ohne Push",
+  "main": "src/server.js",
+  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  }
+}
