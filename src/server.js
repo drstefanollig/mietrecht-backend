@@ -56,7 +56,7 @@ Antworte NUR mit einem JSON-Array, kein Markdown, kein Text davor oder danach:
   try {
     msg = await anthropic.messages.create({
       model:    "claude-sonnet-4-6",
-      max_tokens: 2000,
+      max_tokens: 4000,
       tools:    [{ type: "web_search_20250305", name: "web_search" }],
       system:   systemPrompt,
       messages: [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
@@ -66,7 +66,7 @@ Antworte NUR mit einem JSON-Array, kein Markdown, kein Text davor oder danach:
     console.warn("[API] Web Search fehlgeschlagen, Fallback ohne Web Search:", webSearchErr.message);
     msg = await anthropic.messages.create({
       model:    "claude-sonnet-4-6",
-      max_tokens: 2000,
+      max_tokens: 4000,
       system:   systemPrompt,
       messages: [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
     });
@@ -75,8 +75,14 @@ Antworte NUR mit einem JSON-Array, kein Markdown, kein Text davor oder danach:
   const textBlock = msg.content.find(b => b.type === "text");
   if (!textBlock) throw new Error("Kein Text-Block in API-Antwort");
 
-  const clean  = textBlock.text.replace(/```json|```/g, "").trim();
-  const parsed = JSON.parse(clean);
+  // Robustes Parsing: extrahiere nur den JSON-Array-Teil
+  let raw = textBlock.text.replace(/```json|```/g, "").trim();
+  // Sicherheitshalber: nur den Teil von [ bis zum letzten } ] nehmen
+  const arrStart = raw.indexOf("[");
+  const arrEnd   = raw.lastIndexOf("]");
+  if (arrStart === -1 || arrEnd === -1) throw new Error("Kein JSON-Array gefunden");
+  raw = raw.slice(arrStart, arrEnd + 1);
+  const parsed = JSON.parse(raw);
 
   if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Leeres Array");
 
