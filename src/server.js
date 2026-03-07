@@ -1,6 +1,6 @@
 /**
- * Mietrecht News – Schlankes Backend (ohne Push, ohne Cron)
- * Render.com Free Tier kompatibel
+ * Mietrecht News – Backend v3
+ * Kostensparend: 6h-Cache, kürzere Texte, Haiku statt Sonnet
  */
 
 const express   = require("express");
@@ -10,141 +10,146 @@ const Anthropic = require("@anthropic-ai/sdk");
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// ── Claude Client ───────────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ── News-Cache: verhindert unnötige API-Aufrufe ─────────────────────────────
-// Speichert pro Tag genau einen Abruf – bei erneutem Aufruf am selben Tag
-// werden die gecachten Nachrichten zurückgegeben.
-let newsCache = {
-  date:  null,   // "YYYY-MM-DD"
-  news:  [],     // Array der 5 Nachrichten
-  titles: []     // Titel für Duplikat-Schutz
+// ── Cache ────────────────────────────────────────────────────────────────────
+// Speichert Nachrichten + Zeitstempel des letzten Abrufs.
+// Neue API-Anfrage nur wenn: anderer Tag ODER letzter Abruf > 6 Stunden her.
+let cache = {
+  date:      null,   // "YYYY-MM-DD"
+  fetchedAt: null,   // Timestamp (ms) des letzten erfolgreichen Abrufs
+  news:      [],
+  titles:    []
 };
 
-// ── Bekannte Titel aus dem Cache holen (Duplikat-Schutz) ───────────────────
-function getKnownTitles() {
-  return newsCache.titles || [];
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 Stunden
+
+function cacheValid(today) {
+  if (!cache.date || !cache.fetchedAt || cache.news.length === 0) return false;
+  if (cache.date !== today) return false;
+  const age = Date.now() - cache.fetchedAt;
+  return age < CACHE_TTL_MS;
 }
 
-// ── Nachrichten von Claude holen ────────────────────────────────────────────
-async function fetchNews(forceDate) {
-  const today = forceDate || new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, timezone-safe
-  const known = getKnownTitles();
+// ── News holen ───────────────────────────────────────────────────────────────
+async function fetchNews(today) {
+  const known = cache.titles || [];
 
   const exclusionBlock = known.length > 0
-    ? "\n\nBEREITS BERICHTETE THEMEN (NICHT wiederholen, auch nicht sinngemäß):\n"
+    ? "\n\nBEREITS BERICHTET (nicht wiederholen):\n"
       + known.map((t, i) => `${i + 1}. ${t}`).join("\n")
     : "";
 
+  // Kürzere Details → weniger Output-Tokens → niedrigere Kosten
   const systemPrompt =
-    `Du bist Rechtsredakteur für deutsches Mietrecht. Recherchiere 5 NEUE, bisher nicht berichtete Nachrichten für ${today}.
-Erlaubte Quellen: BGH, OLG, LG-Urteile, Bundesjustizministerium, Bundesbauministerium, Deutscher Mieterbund, Verbraucherzentrale, Statistisches Bundesamt, IW Köln, KfW, GdW, Haufe Mietrecht, NJW, Immobilienscout24, vzbv, dpa.
-Jede Nachricht muss eine ANDERE Quelle und ein ANDERES Thema haben.${exclusionBlock}
+    `Du bist Rechtsredakteur für deutsches Mietrecht. Liefere 5 neue Nachrichten für ${today}.
+Quellen: BGH, OLG, LG, Bundesjustizministerium, Bundesbauministerium, Mieterbund, Verbraucherzentrale, Statistisches Bundesamt, IW Köln, KfW, Haufe, NJW, dpa.
+Jede Nachricht: andere Quelle, anderes Thema.${exclusionBlock}
 
-Antworte NUR mit einem JSON-Array, kein Markdown, kein Text davor oder danach:
-[{"id":"${today}_1","titel":"…","zusammenfassung":"2-3 prägnante Sätze","details":"150-200 Wörter mit konkreten Zahlen und Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Vollständige Quellenangabe","datum":"${today}"}]`;
+Antworte NUR mit JSON-Array, kein Markdown:
+[{"id":"${today}_1","titel":"max 12 Wörter","zusammenfassung":"2 Sätze","details":"max 80 Wörter, konkrete Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Quellenangabe","datum":"${today}"}]`;
 
-  console.log(`[${new Date().toISOString()}] Fetching news for ${today}...`);
+  console.log(`[${new Date().toISOString()}] API-Aufruf für ${today}...`);
 
-  // Versuche zuerst mit Web Search, Fallback ohne Web Search
+  // Versuche mit Web Search, Fallback ohne
   let msg;
   try {
     msg = await anthropic.messages.create({
-      model:    "claude-sonnet-4-6",
-      max_tokens: 4000,
-      tools:    [{ type: "web_search_20250305", name: "web_search" }],
-      system:   systemPrompt,
-      messages: [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
+      model:      "claude-haiku-4-5-20251001",  // günstiger als Sonnet, ausreichend für News
+      max_tokens: 3000,
+      tools:      [{ type: "web_search_20250305", name: "web_search" }],
+      system:     systemPrompt,
+      messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${today}. Nur JSON.` }]
     });
-    console.log("[API] Web Search aktiviert – OK");
-  } catch (webSearchErr) {
-    console.warn("[API] Web Search fehlgeschlagen, Fallback ohne Web Search:", webSearchErr.message);
+    console.log("[API] Mit Web Search OK");
+  } catch (e) {
+    console.warn("[API] Web Search Fallback:", e.message);
     msg = await anthropic.messages.create({
-      model:    "claude-sonnet-4-6",
-      max_tokens: 4000,
-      system:   systemPrompt,
-      messages: [{ role: "user", content: `5 neue Mietrecht-Nachrichten für ${today}. Jede aus anderer Quelle. Nur JSON-Array.` }]
+      model:      "claude-haiku-4-5-20251001",
+      max_tokens: 3000,
+      system:     systemPrompt,
+      messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${today}. Nur JSON.` }]
     });
   }
 
   const textBlock = msg.content.find(b => b.type === "text");
-  if (!textBlock) throw new Error("Kein Text-Block in API-Antwort");
+  if (!textBlock) throw new Error("Kein Text-Block");
 
-  // Robustes Parsing: extrahiere nur den JSON-Array-Teil
   let raw = textBlock.text.replace(/```json|```/g, "").trim();
-  // Sicherheitshalber: nur den Teil von [ bis zum letzten } ] nehmen
-  const arrStart = raw.indexOf("[");
-  const arrEnd   = raw.lastIndexOf("]");
-  if (arrStart === -1 || arrEnd === -1) throw new Error("Kein JSON-Array gefunden");
-  raw = raw.slice(arrStart, arrEnd + 1);
-  const parsed = JSON.parse(raw);
+  const s = raw.indexOf("[");
+  const e = raw.lastIndexOf("]");
+  if (s === -1 || e === -1) throw new Error("Kein JSON-Array");
+  raw = raw.slice(s, e + 1);
 
+  const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Leeres Array");
 
-  // Datum und ID sauber setzen
   const news = parsed.map((n, i) => ({
     ...n,
-    datum: today,
-    id:    `${today}_${i + 1}`,
+    datum:  today,
+    id:     `${today}_${i + 1}`,
     isMock: false
   }));
 
-  // Cache aktualisieren
-  newsCache = {
-    date:   today,
-    news:   news,
+  cache = {
+    date:      today,
+    fetchedAt: Date.now(),
+    news,
     titles: news.map(n => n.titel)
   };
 
-  console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten gecacht.`);
+  console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten, Cache bis ${new Date(cache.fetchedAt + CACHE_TTL_MS).toISOString()}`);
   return news;
 }
 
-// ── GET /api/news ───────────────────────────────────────────────────────────
-// ?refresh=1  → Cache ignorieren, neu laden
+// ── GET /api/news ─────────────────────────────────────────────────────────────
 app.get("/api/news", async (req, res) => {
-  const today   = new Date().toLocaleDateString("sv-SE");
-  const refresh = req.query.refresh === "1";
+  const today = new Date().toLocaleDateString("sv-SE");
 
-  // Cache treffer: gleicher Tag, kein Force-Refresh
-  if (!refresh && newsCache.date === today && newsCache.news.length > 0) {
-    console.log(`[${new Date().toISOString()}] Cache-Hit für ${today}`);
-    return res.json({ news: newsCache.news, cached: true, date: today });
+  if (cacheValid(today)) {
+    const ageMin = Math.floor((Date.now() - cache.fetchedAt) / 60000);
+    console.log(`[${new Date().toISOString()}] Cache-Hit (${ageMin} min alt)`);
+    return res.json({ news: cache.news, cached: true, date: today, cacheAgeMin: ageMin });
   }
 
   try {
     const news = await fetchNews(today);
     res.json({ news, cached: false, date: today });
   } catch (err) {
-    console.error("[FEHLER] fetchNews:", err.message);
+    console.error("[FEHLER]", err.message);
     if (err.status) console.error("[FEHLER] HTTP Status:", err.status);
     if (err.error)  console.error("[FEHLER] API Error:", JSON.stringify(err.error));
-    // Wenn Cache noch brauchbar (anderer Tag aber besser als nichts): zurückgeben
-    if (newsCache.news.length > 0) {
-      return res.json({ news: newsCache.news, cached: true, date: newsCache.date, stale: true });
+
+    // Veralteten Cache lieber zurückgeben als 503
+    if (cache.news.length > 0) {
+      console.log("[FALLBACK] Veralteten Cache zurückgegeben");
+      return res.json({ news: cache.news, cached: true, stale: true, date: cache.date });
     }
-    res.status(503).json({ error: "Nachrichten vorübergehend nicht verfügbar. Bitte erneut versuchen." });
+    res.status(503).json({ error: "Nachrichten nicht verfügbar. Bitte erneut versuchen." });
   }
 });
 
-// ── GET /health ─────────────────────────────────────────────────────────────
+// ── GET /health ───────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
+  const today = new Date().toLocaleDateString("sv-SE");
+  const ageMin = cache.fetchedAt ? Math.floor((Date.now() - cache.fetchedAt) / 60000) : null;
   res.json({
-    status:    "ok",
-    cacheDate: newsCache.date,
-    cacheSize: newsCache.news.length,
-    uptime:    Math.floor(process.uptime()) + "s",
-    apiKey:    process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"
+    status:       "ok",
+    cacheDate:    cache.date,
+    cacheValid:   cacheValid(today),
+    cacheAgeMin:  ageMin,
+    cacheSize:    cache.news.length,
+    uptime:       Math.floor(process.uptime()) + "s",
+    apiKey:       process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"
   });
 });
 
-// ── Server starten ──────────────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Mietrecht News Backend läuft auf Port ${PORT}`);
-  console.log(`ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? "✓ gesetzt" : "✗ FEHLT – /api/news wird nicht funktionieren"}`);
+  console.log(`Mietrecht News Backend v3 auf Port ${PORT}`);
+  console.log(`API-Key: ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"}`);
+  console.log(`Cache-TTL: 6 Stunden`);
 });
