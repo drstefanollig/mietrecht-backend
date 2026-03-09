@@ -50,7 +50,7 @@ Quellen: BGH, OLG, LG, Bundesjustizministerium, Bundesbauministerium, Mieterbund
 Jede Nachricht: andere Quelle, anderes Thema.${exclusionBlock}
 
 Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags, kein Fließtext außerhalb des Arrays:
-[{"id":"${today}_1","titel":"max 12 Wörter","zusammenfassung":"2 Sätze","details":"max 80 Wörter, konkrete Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Quellenangabe","datum":"${today}"}]`;
+[{"id":"${today}_1","titel":"max 12 Wörter","zusammenfassung":"2 Sätze","details":"max 80 Wörter, konkrete Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Quellenangabe Institution","url":"https://direkte-url-zur-originalmeldung-oder-leer","datum":"${today}"}]`;
 
   console.log(`[${new Date().toISOString()}] API-Aufruf für ${today}...`);
 
@@ -98,6 +98,7 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags, k
     zusammenfassung: stripTags(n.zusammenfassung),
     details:        stripTags(n.details),
     quelle:         stripTags(n.quelle),
+    url:            (typeof n.url === "string" && n.url.startsWith("http")) ? n.url : null,
     datum:          today,
     id:             `${today}_${i + 1}`,
     isMock:         false
