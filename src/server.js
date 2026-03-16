@@ -45,12 +45,27 @@ async function fetchNews(today) {
 
   // Kürzere Details → weniger Output-Tokens → niedrigere Kosten
   const systemPrompt =
-    `Du bist Rechtsredakteur für deutsches Mietrecht. Liefere 5 neue Nachrichten für ${today}.
-Quellen: BGH, OLG, LG, Bundesjustizministerium, Bundesbauministerium, Mieterbund, Verbraucherzentrale, Statistisches Bundesamt, IW Köln, KfW, Haufe, NJW, dpa.
-Jede Nachricht: andere Quelle, anderes Thema.${exclusionBlock}
+    `Du bist Rechtsredakteur für deutsches Mietrecht. Recherchiere 5 aktuelle Nachrichten für ${today} aus UNTERSCHIEDLICHEN Themenbereichen.
 
-Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags, kein Fließtext außerhalb des Arrays:
-[{"id":"${today}_1","titel":"max 12 Wörter","zusammenfassung":"2 Sätze","details":"max 80 Wörter, konkrete Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Quellenangabe Institution","url":"https://direkte-url-zur-originalmeldung-oder-leer","datum":"${today}"}]`;
+GERICHTSURTEILE (mindestens 2 der 5 Nachrichten):
+Suche aktiv nach aktuellen Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (Amtsgerichte: AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover).
+Themen: Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eigenbedarfskündigung, Nebenkostenabrechnung, Schimmel, Lärmbelästigung, Tierhaltung, Untervermietung, Modernisierung.
+
+WEITERE QUELLEN für die restlichen 3 Nachrichten:
+Gesetzgebung: Bundesjustizministerium, Bundesbauministerium, Bundesrat, Bundestag, EU-Kommission
+Verbände: Deutscher Mieterbund, Haus & Grund, GdW, IVD, BRAK, vzbv
+Markt/Statistik: Statistisches Bundesamt, IW Köln, Institut Wohnen und Umwelt, KfW, Empirica, JLL, CBRE
+Fachmedien: Haufe Mietrecht, NJW, NZM, ZMR, Grundeigentum, Immobilien Zeitung
+Verbraucher: Verbraucherzentrale, Stiftung Warentest, dpa
+
+PFLICHTREGELN:
+- Jede der 5 Nachrichten MUSS ein anderes Thema UND eine andere Quelle haben
+- Keine zwei Urteile zum gleichen Rechtsproblem
+- Keine allgemeinen Überblicksartikel – nur konkrete Einzelereignisse mit Datum, Aktenzeichen oder Fundstelle
+${exclusionBlock}
+
+Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
+[{"id":"${today}_1","titel":"max 12 Wörter","zusammenfassung":"2 prägnante Sätze mit konkreten Fakten","details":"max 80 Wörter, Aktenzeichen wenn vorhanden, konkrete Zahlen","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Gericht/Institution + Aktenzeichen","url":"https://url-zur-originalmeldung-oder-leerer-string","datum":"${today}"}]`;
 
   console.log(`[${new Date().toISOString()}] API-Aufruf für ${today}...`);
 
