@@ -5,6 +5,8 @@
 
 const express   = require("express");
 const cors      = require("cors");
+const fs        = require("fs");
+const path      = require("path");
 const Anthropic = require("@anthropic-ai/sdk");
 
 const app  = express();
@@ -15,23 +17,34 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ── Cache ────────────────────────────────────────────────────────────────────
-// Speichert Nachrichten + Zeitstempel des letzten Abrufs.
-// Neue API-Anfrage nur wenn: anderer Tag ODER letzter Abruf > 6 Stunden her.
-let cache = {
-  date:      null,   // "YYYY-MM-DD"
-  fetchedAt: null,   // Timestamp (ms) des letzten erfolgreichen Abrufs
-  news:      [],
-  titles:    []
-};
+// ── Persistenter Tages-Cache ─────────────────────────────────────────────────
+// Speichert Nachrichten in einer JSON-Datei – überlebt Server-Neustarts.
+// Damit wird die Claude API garantiert maximal 1x pro Tag aufgerufen.
+const CACHE_FILE = path.join("/tmp", "mietrecht_cache.json");
 
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 Stunden
+let cache = { date: null, news: [], titles: [] };
+
+// Beim Start: Cache aus Datei laden
+(function loadCache() {
+  try {
+    const raw = fs.readFileSync(CACHE_FILE, "utf8");
+    const saved = JSON.parse(raw);
+    const today = new Date().toLocaleDateString("sv-SE");
+    if (saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
+      cache = saved;
+      console.log(`[CACHE] Tages-Cache geladen: ${cache.news.length} Nachrichten für ${cache.date}`);
+    } else {
+      console.log("[CACHE] Kein gültiger Cache für heute – neuer API-Aufruf beim ersten Request.");
+    }
+  } catch { console.log("[CACHE] Keine Cache-Datei gefunden – Neustart."); }
+})();
+
+function saveCache() {
+  try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache)); } catch(e) { console.warn("[CACHE] Speichern fehlgeschlagen:", e.message); }
+}
 
 function cacheValid(today) {
-  if (!cache.date || !cache.fetchedAt || cache.news.length === 0) return false;
-  if (cache.date !== today) return false;
-  const age = Date.now() - cache.fetchedAt;
-  return age < CACHE_TTL_MS;
+  return cache.date === today && cache.news.length > 0;
 }
 
 // ── News holen ───────────────────────────────────────────────────────────────
@@ -120,13 +133,13 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
   }));
 
   cache = {
-    date:      today,
-    fetchedAt: Date.now(),
+    date:   today,
     news,
     titles: news.map(n => n.titel)
   };
+  saveCache();
 
-  console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten, Cache bis ${new Date(cache.fetchedAt + CACHE_TTL_MS).toISOString()}`);
+  console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten für ${today} gecacht und gespeichert.`);
   return news;
 }
 
@@ -135,9 +148,8 @@ app.get("/api/news", async (req, res) => {
   const today = new Date().toLocaleDateString("sv-SE");
 
   if (cacheValid(today)) {
-    const ageMin = Math.floor((Date.now() - cache.fetchedAt) / 60000);
-    console.log(`[${new Date().toISOString()}] Cache-Hit (${ageMin} min alt)`);
-    return res.json({ news: cache.news, cached: true, date: today, cacheAgeMin: ageMin });
+    console.log(`[${new Date().toISOString()}] Cache-Hit für ${today}`);
+    return res.json({ news: cache.news, cached: true, date: today });
   }
 
   try {
@@ -160,15 +172,13 @@ app.get("/api/news", async (req, res) => {
 // ── GET /health ───────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
   const today = new Date().toLocaleDateString("sv-SE");
-  const ageMin = cache.fetchedAt ? Math.floor((Date.now() - cache.fetchedAt) / 60000) : null;
   res.json({
-    status:       "ok",
-    cacheDate:    cache.date,
-    cacheValid:   cacheValid(today),
-    cacheAgeMin:  ageMin,
-    cacheSize:    cache.news.length,
-    uptime:       Math.floor(process.uptime()) + "s",
-    apiKey:       process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"
+    status:     "ok",
+    cacheDate:  cache.date,
+    cacheValid: cacheValid(today),
+    cacheSize:  cache.news.length,
+    uptime:     Math.floor(process.uptime()) + "s",
+    apiKey:     process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"
   });
 });
 
