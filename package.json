@@ -1,12 +1,10 @@
 {
   "name": "mietrecht-news-backend",
-  "version": "2.0.0",
-  "description": "Mietrecht News Backend – schlanke Version ohne Push",
+  "version": "4.1.0",
+  "description": "Mietrecht News Backend mit Upstash Redis Cache",
   "main": "src/server.js",
   "engines": { "node": ">=18.0.0" },
-  "scripts": {
-    "start": "node src/server.js"
-  },
+  "scripts": { "start": "node src/server.js" },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "cors": "^2.8.5",
