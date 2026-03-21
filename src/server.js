@@ -16,15 +16,17 @@ app.use(express.json());
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ── Upstash Redis Cache ───────────────────────────────────────────────────────
-// Persistenter Cache über Render-Neustarts hinweg.
-// UPSTASH_REDIS_URL Format: https://:PASSWORD@HOST.upstash.io
-const REDIS_URL = process.env.UPSTASH_REDIS_URL || null;
-const CACHE_KEY = "mietrecht_cache";
+// Upstash REST API: Token wird als Authorization-Header übergeben
+const REDIS_URL   = process.env.UPSTASH_REDIS_REST_URL   || null;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || null;
+const CACHE_KEY   = "mietrecht_cache";
 
 async function redisGet(key) {
-  if (!REDIS_URL) return null;
+  if (!REDIS_URL || !REDIS_TOKEN) return null;
   try {
-    const res = await fetch(`${REDIS_URL}/get/${key}`);
+    const res  = await fetch(`${REDIS_URL}/get/${key}`, {
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+    });
     const data = await res.json();
     return data.result ? JSON.parse(data.result) : null;
   } catch(e) {
@@ -34,13 +36,15 @@ async function redisGet(key) {
 }
 
 async function redisSet(key, value) {
-  if (!REDIS_URL) return;
+  if (!REDIS_URL || !REDIS_TOKEN) return;
   try {
-    // EX 90000 = 25 Stunden TTL (überlebt den Tag sicher)
-    await fetch(`${REDIS_URL}/set/${key}?EX=90000`, {
+    await fetch(`${REDIS_URL}/set/${key}/ex/90000`, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(JSON.stringify(value))
+      headers: {
+        Authorization:  `Bearer ${REDIS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(JSON.stringify(value))
     });
   } catch(e) {
     console.warn("[REDIS] SET Fehler:", e.message);
@@ -56,8 +60,8 @@ function cacheValid(today) {
 
 // Beim Start: Cache aus Redis laden
 (async function loadCache() {
-  if (!REDIS_URL) {
-    console.warn("[CACHE] Kein UPSTASH_REDIS_URL – Cache nicht persistent. Bitte Upstash einrichten.");
+  if (!REDIS_URL || !REDIS_TOKEN) {
+    console.warn("[CACHE] Kein UPSTASH_REDIS_REST_URL/TOKEN – Cache nicht persistent. Bitte Upstash einrichten.");
     return;
   }
   const saved = await redisGet(CACHE_KEY);
@@ -143,8 +147,21 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
   if (!textBlock) throw new Error("Kein Text-Block");
 
   let raw = textBlock.text.replace(/```json|```/g, "").trim();
-  const s = raw.indexOf("["), e = raw.lastIndexOf("]");
-  if (s === -1 || e === -1) throw new Error("Kein JSON-Array");
+  // Extrahiere JSON-Array – auch wenn Claude Text davor/danach schreibt
+  const s = raw.indexOf("[");
+  let e   = -1;
+  // Suche das korrespondierende schließende ] durch Bracket-Counting
+  if (s !== -1) {
+    let depth = 0;
+    for (let i = s; i < raw.length; i++) {
+      if (raw[i] === "[" || raw[i] === "{") depth++;
+      else if (raw[i] === "]" || raw[i] === "}") { depth--; if (depth === 0 && raw[i] === "]") { e = i; break; } }
+    }
+  }
+  if (s === -1 || e === -1) {
+    console.error("[PARSE] Rohantwort:", raw.slice(0, 500));
+    throw new Error("Kein JSON-Array");
+  }
   raw = raw.slice(s, e + 1);
 
   const parsed = JSON.parse(raw);
@@ -209,7 +226,7 @@ app.get("/health", (req, res) => {
     cacheDate:  cache.date,
     cacheValid: cacheValid(today),
     cacheSize:  cache.news.length,
-    redis:      REDIS_URL ? "✓ konfiguriert" : "✗ FEHLT",
+    redis:      (REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT",
     apiKey:     process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT",
     uptime:     Math.floor(process.uptime()) + "s"
   });
