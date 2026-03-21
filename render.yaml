@@ -9,5 +9,7 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: UPSTASH_REDIS_URL
+        sync: false
       - key: NODE_ENV
         value: production
