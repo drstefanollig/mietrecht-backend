@@ -1,10 +1,12 @@
 /**
- * Mietrecht News – Backend v4 mit Upstash Redis Cache
- * Cache überlebt Render-Neustarts – garantiert max. 1 API-Aufruf pro Tag
+ * Mietrecht News – Backend v5 Final
+ * Redis Cache + Push-Notifications + Cron 09:00 Uhr
  */
 
 const express   = require("express");
 const cors      = require("cors");
+const webpush   = require("web-push");
+const cron      = require("node-cron");
 const Anthropic = require("@anthropic-ai/sdk");
 
 const app  = express();
@@ -15,11 +17,24 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ── Upstash Redis Cache ───────────────────────────────────────────────────────
-// Upstash REST API: Token wird als Authorization-Header übergeben
+// ── VAPID Setup ───────────────────────────────────────────────────────────────
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY  || "";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || "";
+
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  webpush.setVapidDetails(
+    "mailto:info@capera-immobilien.de",
+    VAPID_PUBLIC,
+    VAPID_PRIVATE
+  );
+  console.log("[VAPID] Keys gesetzt ✓");
+} else {
+  console.warn("[VAPID] Keys fehlen – Push deaktiviert.");
+}
+
+// ── Upstash Redis ─────────────────────────────────────────────────────────────
 const REDIS_URL   = process.env.UPSTASH_REDIS_REST_URL   || null;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || null;
-const CACHE_KEY   = "mietrecht_cache";
 
 async function redisGet(key) {
   if (!REDIS_URL || !REDIS_TOKEN) return null;
@@ -29,10 +44,7 @@ async function redisGet(key) {
     });
     const data = await res.json();
     return data.result ? JSON.parse(data.result) : null;
-  } catch(e) {
-    console.warn("[REDIS] GET Fehler:", e.message);
-    return null;
-  }
+  } catch(e) { console.warn("[REDIS] GET Fehler:", e.message); return null; }
 }
 
 async function redisSet(key, value) {
@@ -40,44 +52,50 @@ async function redisSet(key, value) {
   try {
     await fetch(`${REDIS_URL}/set/${key}/ex/90000`, {
       method:  "POST",
-      headers: {
-        Authorization:  `Bearer ${REDIS_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(JSON.stringify(value))
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify(JSON.stringify(value))
     });
-  } catch(e) {
-    console.warn("[REDIS] SET Fehler:", e.message);
-  }
+  } catch(e) { console.warn("[REDIS] SET Fehler:", e.message); }
 }
 
-// ── Memory-Cache (schnell, innerhalb einer Session) ──────────────────────────
+// ── Cache + Subscriptions ─────────────────────────────────────────────────────
 let cache = { date: null, news: [], titles: [] };
+let subs  = [];
 
-function cacheValid(today) {
-  return cache.date === today && cache.news.length > 0;
-}
-
-// Beim Start: Cache aus Redis laden
 (async function loadCache() {
   if (!REDIS_URL || !REDIS_TOKEN) {
-    console.warn("[CACHE] Kein UPSTASH_REDIS_REST_URL/TOKEN – Cache nicht persistent. Bitte Upstash einrichten.");
+    console.warn("[CACHE] Kein Redis – Cache nicht persistent!");
     return;
   }
-  const saved = await redisGet(CACHE_KEY);
+  const saved = await redisGet("mietrecht_cache");
   if (!saved) { console.log("[CACHE] Kein Cache in Redis."); return; }
   const today = new Date().toLocaleDateString("sv-SE");
   if (saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
     cache = saved;
     console.log(`[CACHE] ${cache.news.length} Nachrichten für ${cache.date} aus Redis geladen ✓`);
   } else {
-    console.log(`[CACHE] Redis-Cache veraltet (${saved.date}) – neuer Abruf heute.`);
+    console.log(`[CACHE] Redis-Cache veraltet (${saved.date}).`);
+  }
+})();
+
+(async function loadSubs() {
+  const saved = await redisGet("mietrecht_subs");
+  if (saved && Array.isArray(saved)) {
+    subs = saved;
+    console.log(`[SUBS] ${subs.length} Subscriber geladen.`);
   }
 })();
 
 async function saveCache() {
-  await redisSet(CACHE_KEY, cache);
-  console.log(`[CACHE] In Redis gespeichert für ${cache.date}`);
+  await redisSet("mietrecht_cache", cache);
+}
+
+async function saveSubs() {
+  await redisSet("mietrecht_subs", subs);
+}
+
+function cacheValid(today) {
+  return cache.date === today && cache.news.length > 0;
 }
 
 // ── Hilfsfunktionen ───────────────────────────────────────────────────────────
@@ -147,15 +165,16 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
   if (!textBlock) throw new Error("Kein Text-Block");
 
   let raw = textBlock.text.replace(/```json|```/g, "").trim();
-  // Extrahiere JSON-Array – auch wenn Claude Text davor/danach schreibt
   const s = raw.indexOf("[");
-  let e   = -1;
-  // Suche das korrespondierende schließende ] durch Bracket-Counting
+  let e = -1;
   if (s !== -1) {
     let depth = 0;
     for (let i = s; i < raw.length; i++) {
       if (raw[i] === "[" || raw[i] === "{") depth++;
-      else if (raw[i] === "]" || raw[i] === "}") { depth--; if (depth === 0 && raw[i] === "]") { e = i; break; } }
+      else if (raw[i] === "]" || raw[i] === "}") {
+        depth--;
+        if (depth === 0 && raw[i] === "]") { e = i; break; }
+      }
     }
   }
   if (s === -1 || e === -1) {
@@ -186,25 +205,80 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
   return news;
 }
 
-// ── GET /api/news ─────────────────────────────────────────────────────────────
+// ── Push senden ───────────────────────────────────────────────────────────────
+async function sendPush(news) {
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
+    console.log("[PUSH] Übersprungen – VAPID-Keys nicht gesetzt.");
+    return;
+  }
+  if (subs.length === 0) {
+    console.log("[PUSH] Keine Subscriber.");
+    return;
+  }
+
+  const payload = JSON.stringify({
+    title: "§ Mietrecht News – " + new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "long" }),
+    body:  news[0].titel,
+    icon:  "/icon-192.png",
+    badge: "/icon-192.png",
+    tag:   "mietrecht-daily",
+    data:  { url: "/" }
+  });
+
+  console.log(`[PUSH] Sende an ${subs.length} Subscriber...`);
+  const failed = [];
+
+  await Promise.all(subs.map(async (sub) => {
+    try {
+      await webpush.sendNotification(sub, payload);
+    } catch (err) {
+      console.warn("[PUSH] Fehler:", err.statusCode);
+      if (err.statusCode === 404 || err.statusCode === 410) failed.push(sub.endpoint);
+    }
+  }));
+
+  if (failed.length > 0) {
+    subs = subs.filter(s => !failed.includes(s.endpoint));
+    await saveSubs();
+    console.log(`[PUSH] ${failed.length} abgelaufene Subscriptions entfernt.`);
+  }
+  console.log("[PUSH] Fertig.");
+}
+
+// ── Cron: täglich 09:00 Uhr Europe/Berlin ────────────────────────────────────
+cron.schedule("0 9 * * *", async () => {
+  const today = new Date().toLocaleDateString("sv-SE");
+  console.log(`[CRON] Täglicher Job für ${today}`);
+  if (cacheValid(today)) {
+    console.log("[CRON] Cache vorhanden – nur Push.");
+    await sendPush(cache.news);
+    return;
+  }
+  try {
+    const news = await fetchNews(today);
+    await sendPush(news);
+  } catch (err) {
+    console.error("[CRON] Fehler:", err.message);
+  }
+}, { timezone: "Europe/Berlin" });
+
+// ── REST API ──────────────────────────────────────────────────────────────────
+
 app.get("/api/news", async (req, res) => {
   const today = new Date().toLocaleDateString("sv-SE");
 
-  // 1. Memory-Cache prüfen
   if (cacheValid(today)) {
     console.log(`[API] Memory-Cache Hit für ${today}`);
     return res.json({ news: cache.news, cached: true, date: today });
   }
 
-  // 2. Redis-Cache prüfen (nach Neustart)
-  const saved = await redisGet(CACHE_KEY);
+  const saved = await redisGet("mietrecht_cache");
   if (saved && saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
     cache = saved;
     console.log(`[API] Redis-Cache Hit für ${today}`);
     return res.json({ news: cache.news, cached: true, date: today });
   }
 
-  // 3. Neu von Claude holen
   try {
     const news = await fetchNews(today);
     res.json({ news, cached: false, date: today });
@@ -218,23 +292,47 @@ app.get("/api/news", async (req, res) => {
   }
 });
 
-// ── GET /health ───────────────────────────────────────────────────────────────
+app.post("/api/subscribe", async (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint) return res.status(400).json({ error: "Ungültige Subscription" });
+  if (!subs.find(s => s.endpoint === sub.endpoint)) {
+    subs.push(sub);
+    await saveSubs();
+    console.log(`[SUBS] Neuer Subscriber. Gesamt: ${subs.length}`);
+  }
+  res.json({ ok: true, total: subs.length });
+});
+
+app.post("/api/unsubscribe", async (req, res) => {
+  const { endpoint } = req.body;
+  subs = subs.filter(s => s.endpoint !== endpoint);
+  await saveSubs();
+  res.json({ ok: true });
+});
+
+app.get("/api/vapid-key", (req, res) => {
+  res.json({ key: VAPID_PUBLIC });
+});
+
 app.get("/health", (req, res) => {
   const today = new Date().toLocaleDateString("sv-SE");
   res.json({
-    status:     "ok",
-    cacheDate:  cache.date,
-    cacheValid: cacheValid(today),
-    cacheSize:  cache.news.length,
-    redis:      (REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT",
-    apiKey:     process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT",
-    uptime:     Math.floor(process.uptime()) + "s"
+    status:      "ok",
+    cacheDate:   cache.date,
+    cacheValid:  cacheValid(today),
+    cacheSize:   cache.news.length,
+    subscribers: subs.length,
+    redis:       (REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT",
+    vapid:       VAPID_PUBLIC ? "✓" : "✗ FEHLT (Push deaktiviert)",
+    apiKey:      process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT",
+    uptime:      Math.floor(process.uptime()) + "s"
   });
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Mietrecht News Backend v4 (Redis) auf Port ${PORT}`);
-  console.log(`API-Key: ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"}`);
-  console.log(`Redis:   ${REDIS_URL ? "✓ konfiguriert" : "✗ FEHLT – Cache nicht persistent!"}`);
+  console.log(`Mietrecht News Backend v5 auf Port ${PORT}`);
+  console.log(`API-Key:  ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"}`);
+  console.log(`Redis:    ${(REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT"}`);
+  console.log(`VAPID:    ${VAPID_PUBLIC ? "✓" : "✗ FEHLT – Push deaktiviert"}`);
+  console.log(`Cron:     täglich 09:00 Uhr Europe/Berlin`);
 });
