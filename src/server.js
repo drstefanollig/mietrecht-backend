@@ -1,4 +1,5 @@
 /**
+// Stand: 2026-03-22
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
  */
@@ -119,9 +120,9 @@ async function fetchNews(date) {
   const systemPrompt =
     `Du bist Rechtsredakteur für deutsches Mietrecht. Recherchiere 5 aktuelle Nachrichten für ${date} aus UNTERSCHIEDLICHEN Themenbereichen.
 
-GERICHTSURTEILE (mindestens 2 der 5 Nachrichten):
+GERICHTSURTEILE (mindestens 3 der 5 Nachrichten):
 Suche aktiv nach aktuellen Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (Amtsgerichte: AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover).
-Themen: Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eigenbedarfskündigung, Nebenkostenabrechnung, Schimmel, Lärmbelästigung, Tierhaltung, Untervermietung, Modernisierung.
+Themen: Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eigenbedarfskündigung, Nebenkostenabrechnung, Schimmel, Lärmbelästigung, Tierhaltung, Untervermietung, Modernisierung, Ruhestörung, Wohnungsabnahmen und -übergaben.
 
 WEITERE QUELLEN für die restlichen 3 Nachrichten:
 Gesetzgebung: Bundesjustizministerium, Bundesbauministerium, Bundesrat, Bundestag, EU-Kommission
