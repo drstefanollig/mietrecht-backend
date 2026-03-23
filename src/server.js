@@ -1,7 +1,7 @@
 /**
-// Stand: 2026-03-22
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
+ * Stand: 2026-03-23
  */
 
 const express   = require("express");
@@ -84,6 +84,8 @@ let subs  = [];
   if (saved && Array.isArray(saved)) {
     subs = saved;
     console.log(`[SUBS] ${subs.length} Subscriber geladen.`);
+  } else {
+    console.log("[SUBS] Keine Subscriber in Redis.");
   }
 })();
 
