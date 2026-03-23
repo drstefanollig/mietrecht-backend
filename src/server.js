@@ -1,7 +1,7 @@
 /**
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
- * Stand: 2026-03-23
+ * Stand: 2026-03-23b
  */
 
 const express   = require("express");
@@ -120,7 +120,7 @@ async function fetchNews(date) {
     : "";
 
   const systemPrompt =
-    `Du bist Rechtsredakteur für deutsches Mietrecht. Recherchiere 5 aktuelle Nachrichten für ${date} aus UNTERSCHIEDLICHEN Themenbereichen.
+    `Du bist Rechtsredakteur für deutsches Mietrecht. Recherchiere 5 aktuelle Nachrichten aus den letzten 7 Tagen (Stand: ${date}) aus UNTERSCHIEDLICHEN Themenbereichen. Antworte IMMER mit einem JSON-Array – auch wenn die Nachrichten nicht exakt vom heutigen Tag stammen.
 
 GERICHTSURTEILE (mindestens 3 der 5 Nachrichten):
 Suche aktiv nach aktuellen Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (Amtsgerichte: AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover).
@@ -156,11 +156,13 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
     console.log("[API] Mit Web Search OK");
   } catch (e) {
     console.warn("[API] Web Search Fallback:", e.message);
+    // 10 Sekunden warten um Rate Limit zu vermeiden
+    await new Promise(r => setTimeout(r, 10000));
     msg = await anthropic.messages.create({
       model:      "claude-haiku-4-5-20251001",
       max_tokens: 3000,
       system:     systemPrompt,
-      messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${date}. Nur JSON.` }]
+      messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten der letzten Woche (Stand ${date}). Nur JSON-Array, keine Erklärungen.` }]
     });
   }
 
