@@ -218,7 +218,7 @@ async function sendPush(news) {
   }
 
   const payload = JSON.stringify({
-    title: "§ Mietrecht News – " + new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "long" }),
+    title: "Capera Mietrecht News – " + new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "long" }),
     body:  news[0].titel + "\n\nJetzt lesen – Dein CAPERA News-Team",
     icon:  "/icon-192.png",
     badge: "/icon-192.png",
