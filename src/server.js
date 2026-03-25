@@ -1,7 +1,7 @@
 /**
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
- * Stand: 2026-03-25
+ * Stand: 2026-03-25b
  */
 
 const express   = require("express");
@@ -63,31 +63,34 @@ async function redisSet(key, value) {
 let cache = { date: null, news: [], titles: [] };
 let subs  = [];
 
-(async function loadCache() {
+// Beim Start: Cache und Subscriptions aus Redis laden BEVOR Server startet
+async function initFromRedis() {
   if (!REDIS_URL || !REDIS_TOKEN) {
-    console.warn("[CACHE] Kein Redis – Cache nicht persistent!");
+    console.warn("[INIT] Kein Redis – Cache nicht persistent!");
     return;
   }
-  const saved = await redisGet("mietrecht_cache");
-  if (!saved) { console.log("[CACHE] Kein Cache in Redis."); return; }
-  const today = new Date().toLocaleDateString("sv-SE");
-  if (saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
-    cache = saved;
-    console.log(`[CACHE] ${cache.news.length} Nachrichten für ${cache.date} aus Redis geladen ✓`);
+  // Cache laden
+  const savedCache = await redisGet("mietrecht_cache");
+  if (!savedCache) {
+    console.log("[INIT] Kein Cache in Redis.");
   } else {
-    console.log(`[CACHE] Redis-Cache veraltet (${saved.date}).`);
+    const today = new Date().toLocaleDateString("sv-SE");
+    if (savedCache.date === today && Array.isArray(savedCache.news) && savedCache.news.length > 0) {
+      cache = savedCache;
+      console.log(`[INIT] Cache: ${cache.news.length} Nachrichten für ${cache.date} ✓`);
+    } else {
+      console.log(`[INIT] Cache veraltet (${savedCache.date}).`);
+    }
   }
-})();
-
-(async function loadSubs() {
-  const saved = await redisGet("mietrecht_subs");
-  if (saved && Array.isArray(saved)) {
-    subs = saved;
-    console.log(`[SUBS] ${subs.length} Subscriber geladen.`);
+  // Subscriptions laden
+  const savedSubs = await redisGet("mietrecht_subs");
+  if (savedSubs && Array.isArray(savedSubs)) {
+    subs = savedSubs;
+    console.log(`[INIT] Subscriptions: ${subs.length} Subscriber geladen ✓`);
   } else {
-    console.log("[SUBS] Keine Subscriber in Redis.");
+    console.log("[INIT] Keine Subscriptions in Redis.");
   }
-})();
+}
 
 async function saveCache() {
   await redisSet("mietrecht_cache", cache);
@@ -354,10 +357,19 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Mietrecht News Backend v5 auf Port ${PORT}`);
-  console.log(`API-Key:  ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"}`);
-  console.log(`Redis:    ${(REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT"}`);
-  console.log(`VAPID:    ${VAPID_PUBLIC ? "✓" : "✗ FEHLT – Push deaktiviert"}`);
-  console.log(`Cron:     täglich 09:00 Uhr Europe/Berlin`);
+// Server erst starten nachdem Redis geladen ist
+initFromRedis().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Mietrecht News Backend v5 auf Port ${PORT}`);
+    console.log(`API-Key:  ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"}`);
+    console.log(`Redis:    ${(REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT"}`);
+    console.log(`VAPID:    ${VAPID_PUBLIC ? "✓" : "✗ FEHLT – Push deaktiviert"}`);
+    console.log(`Cron:     täglich 09:00 Uhr Europe/Berlin`);
+  });
+}).catch(err => {
+  console.error("[INIT] Fehler beim Start:", err.message);
+  // Server trotzdem starten
+  app.listen(PORT, () => {
+    console.log(`Mietrecht News Backend v5 auf Port ${PORT} (ohne Redis-Init)`);
+  });
 });
