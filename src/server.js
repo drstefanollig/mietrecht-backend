@@ -1,7 +1,7 @@
 /**
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
- * Stand: 2026-03-25c
+ * Stand: 2026-03-25d
  */
 
 const express   = require("express");
@@ -40,22 +40,30 @@ const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || null;
 async function redisGet(key) {
   if (!REDIS_URL || !REDIS_TOKEN) return null;
   try {
-    const res  = await fetch(`${REDIS_URL}/get/${key}`, {
-      headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+    const res  = await fetch(`${REDIS_URL}`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify(["GET", key])
     });
     const data = await res.json();
     return data.result ? JSON.parse(data.result) : null;
   } catch(e) { console.warn("[REDIS] GET Fehler:", e.message); return null; }
 }
 
-async function redisSet(key, value) {
+async function redisSet(key, value, ttlSeconds) {
   if (!REDIS_URL || !REDIS_TOKEN) return;
   try {
-    await fetch(`${REDIS_URL}/set/${key}/ex/604800`, {
+    // Upstash REST: ["SET", key, value] oder ["SET", key, value, "EX", ttl]
+    const cmd = ttlSeconds
+      ? ["SET", key, JSON.stringify(value), "EX", ttlSeconds]
+      : ["SET", key, JSON.stringify(value)];
+    const res = await fetch(`${REDIS_URL}`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify(JSON.stringify(value))
+      body:    JSON.stringify(cmd)
     });
+    const data = await res.json();
+    if (data.error) console.warn("[REDIS] SET Fehler:", data.error);
   } catch(e) { console.warn("[REDIS] SET Fehler:", e.message); }
 }
 
@@ -93,20 +101,12 @@ async function initFromRedis() {
 }
 
 async function saveCache() {
-  await redisSet("mietrecht_cache", cache);
+  await redisSet("mietrecht_cache", cache, 604800); // 7 Tage TTL
 }
 
 async function saveSubs() {
-  // Subscriptions ohne TTL speichern – sollen nie ablaufen
-  if (!REDIS_URL || !REDIS_TOKEN) return;
-  try {
-    await fetch(`${REDIS_URL}/set/mietrecht_subs`, {
-      method:  "POST",
-      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
-      body:    JSON.stringify(JSON.stringify(subs))
-    });
-    console.log(`[SUBS] ${subs.length} Subscriber in Redis gespeichert (kein TTL).`);
-  } catch(e) { console.warn("[SUBS] Speichern fehlgeschlagen:", e.message); }
+  await redisSet("mietrecht_subs", subs); // kein TTL – Subscriptions bleiben dauerhaft
+  console.log(`[SUBS] ${subs.length} Subscriber in Redis gespeichert.`);
 }
 
 function cacheValid(today) {
