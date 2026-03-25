@@ -1,7 +1,7 @@
 /**
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
- * Stand: 2026-03-23b
+ * Stand: 2026-03-25
  */
 
 const express   = require("express");
@@ -251,19 +251,39 @@ async function sendPush(news) {
 }
 
 // ── Cron: täglich 09:00 Uhr Europe/Berlin ────────────────────────────────────
+let cronRunning = false; // verhindert parallele Ausführung
+
 cron.schedule("0 9 * * *", async () => {
-  const today = new Date().toLocaleDateString("sv-SE");
-  console.log(`[CRON] Täglicher Job für ${today}`);
-  if (cacheValid(today)) {
-    console.log("[CRON] Cache vorhanden – nur Push.");
-    await sendPush(cache.news);
+  if (cronRunning) {
+    console.log("[CRON] Bereits aktiv – übersprungen.");
     return;
   }
+  cronRunning = true;
+  const today = new Date().toLocaleDateString("sv-SE");
+  console.log(`[CRON] Täglicher Job für ${today}`);
+
   try {
+    // Redis nochmal prüfen – falls anderer Prozess bereits geladen hat
+    const saved = await redisGet("mietrecht_cache");
+    if (saved && saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
+      cache = saved;
+      console.log("[CRON] Cache aus Redis geladen – sende Push.");
+      await sendPush(cache.news);
+      return;
+    }
+
+    // Neu laden
     const news = await fetchNews(today);
     await sendPush(news);
   } catch (err) {
     console.error("[CRON] Fehler:", err.message);
+    // Falls Cache trotzdem gefüllt wurde: Push noch senden
+    if (cache.news.length > 0 && cache.date === today) {
+      console.log("[CRON] Sende Push trotz Fehler mit vorhandenem Cache.");
+      await sendPush(cache.news);
+    }
+  } finally {
+    cronRunning = false;
   }
 }, { timezone: "Europe/Berlin" });
 
