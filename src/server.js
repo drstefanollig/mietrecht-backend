@@ -1,7 +1,7 @@
 /**
  * Mietrecht News – Backend v5 Final
  * Redis Cache + Push-Notifications + Cron 09:00 Uhr
- * Stand: 2026-03-25b
+ * Stand: 2026-03-25c
  */
 
 const express   = require("express");
@@ -51,7 +51,7 @@ async function redisGet(key) {
 async function redisSet(key, value) {
   if (!REDIS_URL || !REDIS_TOKEN) return;
   try {
-    await fetch(`${REDIS_URL}/set/${key}/ex/90000`, {
+    await fetch(`${REDIS_URL}/set/${key}/ex/604800`, {
       method:  "POST",
       headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
       body:    JSON.stringify(JSON.stringify(value))
@@ -97,7 +97,16 @@ async function saveCache() {
 }
 
 async function saveSubs() {
-  await redisSet("mietrecht_subs", subs);
+  // Subscriptions ohne TTL speichern – sollen nie ablaufen
+  if (!REDIS_URL || !REDIS_TOKEN) return;
+  try {
+    await fetch(`${REDIS_URL}/set/mietrecht_subs`, {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify(JSON.stringify(subs))
+    });
+    console.log(`[SUBS] ${subs.length} Subscriber in Redis gespeichert (kein TTL).`);
+  } catch(e) { console.warn("[SUBS] Speichern fehlgeschlagen:", e.message); }
 }
 
 function cacheValid(today) {
