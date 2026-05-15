@@ -109,6 +109,7 @@ async function initFromRedis() {
 
 async function saveCache() {
   await redisSet("mietrecht_cache", cache, 604800); // 7 Tage TTL
+  await redisSet(`mietrecht_archive_${cache.date}`, cache.news, 2592000); // 30 Tage Archiv
 }
 
 async function saveTitleHistory(newTitles) {
@@ -319,34 +320,91 @@ cron.schedule("0 9 * * *", async () => {
   }
 }, { timezone: "Europe/Berlin" });
 
+// ── Hilfsfunktion: News für ein bestimmtes Datum holen (Cache → Archiv → Generieren) ──
+const ARCHIVE_LIMIT_DAYS = 30;
+
+async function getNewsForDate(date) {
+  const today = new Date().toLocaleDateString("sv-SE");
+
+  // Zukunft ablehnen
+  if (date > today) return null;
+
+  // Maximales Archivfenster prüfen
+  const msPerDay   = 86400000;
+  const diffDays   = Math.round((new Date(today) - new Date(date)) / msPerDay);
+  if (diffDays > ARCHIVE_LIMIT_DAYS) return null;
+
+  // Memory-Cache (nur für heute relevant)
+  if (date === today && cacheValid(today)) {
+    console.log(`[API] Memory-Cache Hit für ${date}`);
+    return { news: cache.news, cached: true };
+  }
+
+  // Redis-Archiv prüfen
+  const archiveKey = `mietrecht_archive_${date}`;
+  const archived   = await redisGet(archiveKey);
+  if (archived && Array.isArray(archived) && archived.length > 0) {
+    console.log(`[API] Archiv-Cache Hit für ${date}`);
+    if (date === today) cache = { date, news: archived, titles: archived.map(n => n.titel) };
+    return { news: archived, cached: true };
+  }
+
+  // Noch nicht vorhanden → generieren
+  console.log(`[API] Generiere rückwirkend für ${date}...`);
+  const news = await fetchNews(date);
+  return { news, cached: false };
+}
+
 // ── REST API ──────────────────────────────────────────────────────────────────
 
 app.get("/api/news", async (req, res) => {
   const today = new Date().toLocaleDateString("sv-SE");
-
-  if (cacheValid(today)) {
-    console.log(`[API] Memory-Cache Hit für ${today}`);
-    return res.json({ news: cache.news, cached: true, date: today });
-  }
-
-  const saved = await redisGet("mietrecht_cache");
-  if (saved && saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
-    cache = saved;
-    console.log(`[API] Redis-Cache Hit für ${today}`);
-    return res.json({ news: cache.news, cached: true, date: today });
-  }
-
   try {
-    const news = await fetchNews(today);
-    res.json({ news, cached: false, date: today });
+    const result = await getNewsForDate(today);
+    if (!result) return res.status(503).json({ error: "Nachrichten nicht verfügbar." });
+    res.json({ ...result, date: today });
   } catch (err) {
     console.error("[FEHLER]", err.message);
-    if (err.status) console.error("[FEHLER] HTTP Status:", err.status);
     if (cache.news.length > 0) {
       return res.json({ news: cache.news, cached: true, stale: true, date: cache.date });
     }
     res.status(503).json({ error: "Nachrichten nicht verfügbar. Bitte erneut versuchen." });
   }
+});
+
+app.get("/api/news/:date", async (req, res) => {
+  const date = req.params.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: "Ungültiges Datumsformat. Erwartet: YYYY-MM-DD" });
+  }
+  try {
+    const result = await getNewsForDate(date);
+    if (!result) {
+      return res.status(404).json({ error: `Keine Nachrichten für ${date}. Archiv reicht max. ${ARCHIVE_LIMIT_DAYS} Tage zurück.` });
+    }
+    res.json({ ...result, date });
+  } catch (err) {
+    console.error(`[FEHLER] Archiv ${date}:`, err.message);
+    res.status(503).json({ error: "Nachrichten nicht verfügbar. Bitte erneut versuchen." });
+  }
+});
+
+app.get("/api/archive", async (req, res) => {
+  const today    = new Date().toLocaleDateString("sv-SE");
+  const msPerDay = 86400000;
+  const dates    = [];
+  for (let i = 0; i < ARCHIVE_LIMIT_DAYS; i++) {
+    const d = new Date(new Date(today) - i * msPerDay).toLocaleDateString("sv-SE");
+    dates.push(d);
+  }
+  // Parallel prüfen welche Daten in Redis vorhanden sind
+  const checks = await Promise.all(
+    dates.map(async d => {
+      const data = await redisGet(`mietrecht_archive_${d}`);
+      return data && Array.isArray(data) && data.length > 0 ? d : null;
+    })
+  );
+  res.json({ available: checks.filter(Boolean) });
 });
 
 app.post("/api/subscribe", async (req, res) => {
