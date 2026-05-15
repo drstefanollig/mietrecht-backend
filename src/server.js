@@ -13,6 +13,7 @@ const Anthropic = require("@anthropic-ai/sdk");
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+app.set("etag", false);
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
