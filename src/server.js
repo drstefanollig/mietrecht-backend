@@ -68,8 +68,9 @@ async function redisSet(key, value, ttlSeconds) {
 }
 
 // ── Cache + Subscriptions ─────────────────────────────────────────────────────
-let cache = { date: null, news: [], titles: [] };
-let subs  = [];
+let cache      = { date: null, news: [], titles: [] };
+let subs       = [];
+let titleHistory = []; // persistente Titelhistorie über mehrere Tage
 
 // Beim Start: Cache und Subscriptions aus Redis laden BEVOR Server startet
 async function initFromRedis() {
@@ -90,6 +91,12 @@ async function initFromRedis() {
       console.log(`[INIT] Cache veraltet (${savedCache.date}).`);
     }
   }
+  // Titelhistorie laden
+  const savedHistory = await redisGet("mietrecht_title_history");
+  if (savedHistory && Array.isArray(savedHistory)) {
+    titleHistory = savedHistory;
+    console.log(`[INIT] Titelhistorie: ${titleHistory.length} Einträge geladen ✓`);
+  }
   // Subscriptions laden
   const savedSubs = await redisGet("mietrecht_subs");
   if (savedSubs && Array.isArray(savedSubs)) {
@@ -102,6 +109,12 @@ async function initFromRedis() {
 
 async function saveCache() {
   await redisSet("mietrecht_cache", cache, 604800); // 7 Tage TTL
+}
+
+async function saveTitleHistory(newTitles) {
+  titleHistory = [...titleHistory, ...newTitles].slice(-150); // max. 150 Titel ≈ 30 Tage
+  await redisSet("mietrecht_title_history", titleHistory, 2592000); // 30 Tage TTL
+  console.log(`[HISTORY] ${titleHistory.length} Titel gespeichert.`);
 }
 
 async function saveSubs() {
@@ -120,7 +133,7 @@ function stripTags(val) {
 }
 
 function getKnownTitles() {
-  return (cache.titles || []).slice(-20);
+  return titleHistory.slice(-100); // letzte 100 Titel (≈ 20 Tage) an Claude übergeben
 }
 
 // ── News von Claude holen ─────────────────────────────────────────────────────
@@ -132,22 +145,28 @@ async function fetchNews(date) {
     : "";
 
   const systemPrompt =
-    `Du bist Rechtsredakteur für deutsches Mietrecht. Recherchiere 5 aktuelle Nachrichten aus den letzten 7 Tagen (Stand: ${date}) aus UNTERSCHIEDLICHEN Themenbereichen. Antworte IMMER mit einem JSON-Array – auch wenn die Nachrichten nicht exakt vom heutigen Tag stammen.
+    `Du bist Rechtsredakteur für deutsches Mietrecht und Immobilienverwaltung. Recherchiere 5 aktuelle Nachrichten aus den letzten 14 Tagen (Stand: ${date}) aus VOLLSTÄNDIG UNTERSCHIEDLICHEN Themenbereichen. Antworte IMMER mit einem JSON-Array.
 
 GERICHTSURTEILE (mindestens 3 der 5 Nachrichten):
-Suche aktiv nach aktuellen Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (Amtsgerichte: AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover).
-Themen: Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eigenbedarfskündigung, Nebenkostenabrechnung, Schimmel, Lärmbelästigung, Tierhaltung, Untervermietung, Modernisierung, Ruhestörung, Wohnungsabnahmen und -übergaben.
+Suche aktiv nach Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover, AG Charlottenburg, AG Schöneberg, AG Wedding, AG Tempelhof-Kreuzberg, AG Spandau).
 
-WEITERE QUELLEN für die restlichen 3 Nachrichten:
+THEMEN MIETRECHT:
+Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eigenbedarfskündigung, Nebenkostenabrechnung, Schimmel/Feuchte, Lärmbelästigung, Tierhaltung, Untervermietung, Modernisierungsumlage, Ruhestörung, Wohnungsübergabe/-abnahme, Mietspiegel, Mietpreisbremse, Indexmiete, Staffelmiete.
+
+THEMEN IMMOBILIENVERWALTUNG & WEG:
+WEG-Recht (Wohnungseigentumsgesetz), Beschlüsse der Eigentümerversammlung, Verwaltervertrag/-abberufung, Hausgeldabrechnungen, Instandhaltungs-/Instandsetzungspflichten, Sondereigentum vs. Gemeinschaftseigentum, Bauliche Veränderungen §20 WEG, Erhaltungsrücklage, Zwangsverwaltung, Sonderumlage, Hausordnung, Verwalter-Haftung, Beirat-Kompetenzen, Beschlussanfechtung, Jahresabrechnung WEG, Wohnungseigentümer-Rechte.
+
+WEITERE QUELLEN (2 der 5 Nachrichten):
 Gesetzgebung: Bundesjustizministerium, Bundesbauministerium, Bundesrat, Bundestag, EU-Kommission
-Verbände: Deutscher Mieterbund, Haus & Grund, GdW, IVD, BRAK, vzbv
+Verbände: Deutscher Mieterbund, Haus & Grund, GdW, IVD, DDIV (Dachverband Deutscher Immobilienverwalter), BVFI, VDIV, BRAK, vzbv
 Markt/Statistik: Statistisches Bundesamt, IW Köln, Institut Wohnen und Umwelt, KfW, Empirica, JLL, CBRE
-Fachmedien: Haufe Mietrecht, NJW, NZM, ZMR, Grundeigentum, Immobilien Zeitung
+Fachmedien: Haufe Mietrecht, Haufe Immobilien, NJW, NZM, ZMR, ZWE (Zeitschrift für Wohnungseigentumsrecht), Grundeigentum, Immobilien Zeitung, WEG-Recht aktuell
 Verbraucher: Verbraucherzentrale, Stiftung Warentest, dpa
 
-PFLICHTREGELN:
-- Jede der 5 Nachrichten MUSS ein anderes Thema UND eine andere Quelle haben
-- Keine zwei Urteile zum gleichen Rechtsproblem
+STRIKTE DUPLIKAT-REGELN – HÖCHSTE PRIORITÄT:
+- Kein Thema, kein Gericht, keine Institution darf sich mit den unten gelisteten Titeln überschneiden
+- Auch sinngemäße Wiederholungen sind verboten (z.B. nicht zweimal "Eigenbedarfskündigung" auch wenn Gericht anders ist)
+- Jede der 5 Nachrichten MUSS ein anderes Rechtsgebiet UND eine andere Quelle haben
 - Keine allgemeinen Überblicksartikel – nur konkrete Einzelereignisse mit Datum, Aktenzeichen oder Fundstelle
 ${exclusionBlock}
 
@@ -217,6 +236,7 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
 
   cache = { date, news, titles: news.map(n => n.titel) };
   await saveCache();
+  await saveTitleHistory(news.map(n => n.titel));
 
   console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten in Redis gespeichert.`);
   return news;
