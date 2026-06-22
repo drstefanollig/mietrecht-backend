@@ -138,6 +138,32 @@ function getKnownTitles() {
   return titleHistory.slice(-30); // letzte 30 Titel (≈ 6 Tage) an Claude übergeben
 }
 
+// ── Google News RSS fetchen ───────────────────────────────────────────────────
+async function fetchGoogleNewsRss() {
+  const queries = [
+    "Mietrecht Urteil BGH OLG",
+    "WEG Wohnungseigentumsrecht Urteil",
+    "Miete Kündigung Nebenkosten Urteil"
+  ];
+  const items = [];
+  for (const q of queries) {
+    try {
+      const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=de&gl=DE&ceid=DE:de`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      const text = await res.text();
+      const matches = [...text.matchAll(/<item>[\s\S]*?<title><!\[CDATA\[(.*?)\]\]><\/title>[\s\S]*?<\/item>/g)];
+      for (const m of matches.slice(0, 6)) {
+        const title = m[1].replace(/ - [^-]+$/, "").trim(); // Quellenangabe am Ende entfernen
+        if (!items.find(i => i === title)) items.push(title);
+      }
+    } catch (e) {
+      console.warn("[RSS] Fehler bei Query:", q, e.message);
+    }
+  }
+  console.log(`[RSS] ${items.length} aktuelle Schlagzeilen geladen`);
+  return items;
+}
+
 // ── News von Claude holen ─────────────────────────────────────────────────────
 async function fetchNews(date) {
   const known = getKnownTitles();
@@ -146,8 +172,15 @@ async function fetchNews(date) {
       + known.map((t, i) => `${i + 1}. ${t}`).join("\n")
     : "";
 
+  // Aktuelle Schlagzeilen via RSS holen
+  const rssHeadlines = await fetchGoogleNewsRss();
+  const rssBlock = rssHeadlines.length > 0
+    ? "\n\nAKTUELLE SCHLAGZEILEN AUS GOOGLE NEWS (Stand heute – als Recherchegrundlage nutzen):\n"
+      + rssHeadlines.map((t, i) => `${i + 1}. ${t}`).join("\n")
+    : "";
+
   const systemPrompt =
-    `Du bist Rechtsredakteur für deutsches Mietrecht und Immobilienverwaltung. Recherchiere 5 aktuelle Nachrichten aus den letzten 14 Tagen (Stand: ${date}) aus VOLLSTÄNDIG UNTERSCHIEDLICHEN Themenbereichen. Antworte IMMER mit einem JSON-Array.
+    `Du bist Rechtsredakteur für deutsches Mietrecht und Immobilienverwaltung. Erstelle 5 aktuelle Nachrichten (Stand: ${date}) aus VOLLSTÄNDIG UNTERSCHIEDLICHEN Themenbereichen basierend auf den unten gelisteten aktuellen Schlagzeilen. Antworte IMMER mit einem JSON-Array.
 
 GERICHTSURTEILE (mindestens 3 der 5 Nachrichten):
 Suche aktiv nach Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover, AG Charlottenburg, AG Schöneberg, AG Wedding, AG Tempelhof-Kreuzberg, AG Spandau).
@@ -158,45 +191,25 @@ Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eige
 THEMEN IMMOBILIENVERWALTUNG & WEG:
 WEG-Recht (Wohnungseigentumsgesetz), Beschlüsse der Eigentümerversammlung, Verwaltervertrag/-abberufung, Hausgeldabrechnungen, Instandhaltungs-/Instandsetzungspflichten, Sondereigentum vs. Gemeinschaftseigentum, Bauliche Veränderungen §20 WEG, Erhaltungsrücklage, Zwangsverwaltung, Sonderumlage, Hausordnung, Verwalter-Haftung, Beirat-Kompetenzen, Beschlussanfechtung, Jahresabrechnung WEG, Wohnungseigentümer-Rechte.
 
-WEITERE QUELLEN (2 der 5 Nachrichten):
-Gesetzgebung: Bundesjustizministerium, Bundesbauministerium, Bundesrat, Bundestag, EU-Kommission
-Verbände: Deutscher Mieterbund, Haus & Grund, GdW, IVD, DDIV (Dachverband Deutscher Immobilienverwalter), BVFI, VDIV, BRAK, vzbv
-Markt/Statistik: Statistisches Bundesamt, IW Köln, Institut Wohnen und Umwelt, KfW, Empirica, JLL, CBRE
-Fachmedien: Haufe Mietrecht, Haufe Immobilien, NJW, NZM, ZMR, ZWE (Zeitschrift für Wohnungseigentumsrecht), Grundeigentum, Immobilien Zeitung, WEG-Recht aktuell
-Verbraucher: Verbraucherzentrale, Stiftung Warentest, dpa
-
 STRIKTE DUPLIKAT-REGELN – HÖCHSTE PRIORITÄT:
 - Kein Thema, kein Gericht, keine Institution darf sich mit den unten gelisteten Titeln überschneiden
-- Auch sinngemäße Wiederholungen sind verboten (z.B. nicht zweimal "Eigenbedarfskündigung" auch wenn Gericht anders ist)
+- Auch sinngemäße Wiederholungen sind verboten
 - Jede der 5 Nachrichten MUSS ein anderes Rechtsgebiet UND eine andere Quelle haben
 - Keine allgemeinen Überblicksartikel – nur konkrete Einzelereignisse mit Datum, Aktenzeichen oder Fundstelle
-${exclusionBlock}
+${rssBlock}${exclusionBlock}
 
 Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
 [{"id":"${date}_1","titel":"max 12 Wörter","zusammenfassung":"2 prägnante Sätze mit konkreten Fakten","details":"max 80 Wörter, Aktenzeichen wenn vorhanden","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Gericht/Institution + Aktenzeichen","url":"https://url-oder-leerer-string","datum":"${date}"}]`;
 
   console.log(`[${new Date().toISOString()}] API-Aufruf für ${date}...`);
 
-  let msg;
-  try {
-    msg = await anthropic.messages.stream({
-      model:      "claude-haiku-4-5-20251001",
-      max_tokens: 3000,
-      tools:      [{ type: "web_search_20260209", name: "web_search" }],
-      system:     systemPrompt,
-      messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${date}. Nur JSON.` }]
-    }).finalMessage();
-    console.log("[API] Mit Web Search OK");
-  } catch (e) {
-    console.warn("[API] Web Search Fallback:", e.message);
-    await new Promise(r => setTimeout(r, 5000));
-    msg = await anthropic.messages.stream({
-      model:      "claude-haiku-4-5-20251001",
-      max_tokens: 3000,
-      system:     systemPrompt,
-      messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten der letzten Woche (Stand ${date}). Nur JSON-Array, keine Erklärungen.` }]
-    }).finalMessage();
-  }
+  const msg = await anthropic.messages.create({
+    model:      "claude-haiku-4-5-20251001",
+    max_tokens: 3000,
+    system:     systemPrompt,
+    messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${date} basierend auf den aktuellen Schlagzeilen. Nur JSON.` }]
+  });
+  console.log("[API] OK");
 
   const textBlock = msg.content.find(b => b.type === "text");
   if (!textBlock) throw new Error("Kein Text-Block");
