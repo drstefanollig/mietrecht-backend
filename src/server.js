@@ -180,7 +180,7 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
   let msg;
   try {
     msg = await anthropic.messages.create({
-      model:      "claude-haiku-4-5",
+      model:      "claude-haiku-4-5-20251001",
       max_tokens: 3000,
       tools:      [{ type: "web_search_20260209", name: "web_search" }],
       system:     systemPrompt,
@@ -192,7 +192,7 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
     // 10 Sekunden warten um Rate Limit zu vermeiden
     await new Promise(r => setTimeout(r, 10000));
     msg = await anthropic.messages.create({
-      model:      "claude-haiku-4-5",
+      model:      "claude-haiku-4-5-20251001",
       max_tokens: 3000,
       system:     systemPrompt,
       messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten der letzten Woche (Stand ${date}). Nur JSON-Array, keine Erklärungen.` }]
