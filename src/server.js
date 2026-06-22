@@ -179,24 +179,23 @@ Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
 
   let msg;
   try {
-    msg = await anthropic.messages.create({
+    msg = await anthropic.messages.stream({
       model:      "claude-sonnet-4-6",
       max_tokens: 3000,
       tools:      [{ type: "web_search_20260209", name: "web_search" }],
       system:     systemPrompt,
       messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${date}. Nur JSON.` }]
-    });
+    }).finalMessage();
     console.log("[API] Mit Web Search OK");
   } catch (e) {
     console.warn("[API] Web Search Fallback:", e.message);
-    // 10 Sekunden warten um Rate Limit zu vermeiden
-    await new Promise(r => setTimeout(r, 10000));
-    msg = await anthropic.messages.create({
+    await new Promise(r => setTimeout(r, 5000));
+    msg = await anthropic.messages.stream({
       model:      "claude-sonnet-4-6",
       max_tokens: 3000,
       system:     systemPrompt,
       messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten der letzten Woche (Stand ${date}). Nur JSON-Array, keine Erklärungen.` }]
-    });
+    }).finalMessage();
   }
 
   const textBlock = msg.content.find(b => b.type === "text");
