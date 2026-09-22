@@ -148,9 +148,14 @@ function cleanText(val, maxLen) {
   return val.replace(/<[^>]+>/g, "").trim().slice(0, maxLen);
 }
 
-// Meldungen ohne Originallink stammen aus der früheren, quellenlosen Generierung
+// Nur Meldungen der Quellen-Pipeline zählen: Link UND Veröffentlichungsdatum stammen aus dem Feed.
+// Frühere Meldungen wurden ohne Quelle generiert – teils mit erfundenen Links auf Gerichts-Startseiten.
+function isSourced(n) {
+  return !!n && typeof n.url === "string" && n.url.startsWith("http") && typeof n.veroeffentlicht === "string";
+}
+
 function hasSources(news) {
-  return Array.isArray(news) && news.some(n => n && typeof n.url === "string" && n.url.startsWith("http"));
+  return Array.isArray(news) && news.some(isSourced);
 }
 
 function extractJsonArray(text) {
