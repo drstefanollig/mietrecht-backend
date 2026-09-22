@@ -183,7 +183,7 @@ async function fetchNews(date) {
 
   const texts = await Promise.all(candidates.map(c => fetchArticleText(c.link)));
   const sourceBlock = candidates.map((c, i) =>
-    `[${i + 1}] Quelle: ${c.source} | veröffentlicht: ${c.published.toISOString().slice(0, 10)}\n` +
+    `[${i + 1}] Quelle: ${c.source}${c.feed === "Bing News" ? " (über Bing News)" : ""} | veröffentlicht: ${c.published.toISOString().slice(0, 10)}\n` +
     `Titel: ${c.title}\n` +
     `Text: ${texts[i] || c.description || "(nur Titel verfügbar)"}`
   ).join("\n\n");
@@ -199,7 +199,7 @@ Du erhältst nummerierte, echte Artikel. Wähle bis zu 5 Artikel aus, die für M
 
 REGELN:
 - Verwende ausschließlich Informationen aus dem Text des jeweiligen Artikels. Erfinde nichts: keine Aktenzeichen, Daten, Zahlen, Gerichte oder Zitate, die dort nicht stehen.
-- Bevorzuge Gerichtsentscheidungen und Gesetzgebung vor Markt- und Branchenmeldungen, und Primär- und Fachquellen (BGH, Haufe, LTO, beck-aktuell) vor Ratgeber- und Boulevardportalen.
+- Bevorzuge Gerichtsentscheidungen und Gesetzgebung vor Markt- und Branchenmeldungen, und Primär- und Fachquellen (BGH, Haufe, LTO, beck-aktuell) vor Ratgeber- und Boulevardportalen. Höchstens 2 Artikel "über Bing News".
 - Keine zwei Artikel zum selben Thema. Lieber weniger als 5 als unpassende Artikel (Büro-/Gewerbe-Investment, Podcasts, Preisverleihungen, Personalien weglassen).
 - Formuliere eigenständig, übernimm keine Sätze wörtlich.
 - "aktenzeichen" nur, wenn es wörtlich im Artikeltext steht, sonst leerer String.
@@ -224,12 +224,16 @@ Antworte NUR mit einem JSON-Array, ohne Markdown:
     throw new Error("Kein JSON-Array");
   }
 
+  const MAX_BING = 2; // Fachquellen vor Ratgeberportalen
   const used = new Set();
   const news = [];
+  let bingCount = 0;
   for (const n of parsed) {
     const idx = Number(n && n.nr) - 1;
     const c = candidates[idx];
     if (!c || used.has(idx) || news.length >= 5) continue;
+    if (c.feed === "Bing News" && bingCount >= MAX_BING) continue;
+    if (c.feed === "Bing News") bingCount++;
     used.add(idx);
     const text = texts[idx] || c.description;
     const az = cleanText(n.aktenzeichen, 40);

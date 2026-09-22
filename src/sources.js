@@ -89,6 +89,7 @@ async function fetchFeed(feed) {
       description: htmlToText(tag(block, "description")).slice(0, 600),
       published:   parseDate(block),
       source,
+      feed:        feed.name,           // Gruppierung: alle Bing-Treffer zählen als eine Quelle
       maxAgeDays:  feed.maxAgeDays
     };
   }).filter(i => i.title && i.link && i.published);
@@ -126,14 +127,14 @@ async function fetchCandidates(date, { excludeUrls = new Set(), maxAgeDays = 10,
       return true;
     });
 
-  const bySource = new Map();
+  const byFeed = new Map();
   for (const i of fresh) {
-    if (!bySource.has(i.source)) bySource.set(i.source, []);
-    bySource.get(i.source).push(i);
+    if (!byFeed.has(i.feed)) byFeed.set(i.feed, []);
+    byFeed.get(i.feed).push(i);
   }
   const picked = [];
-  while (picked.length < limit && [...bySource.values()].some(list => list.length)) {
-    for (const list of bySource.values()) {
+  while (picked.length < limit && [...byFeed.values()].some(list => list.length)) {
+    for (const list of byFeed.values()) {
       if (list.length && picked.length < limit) picked.push(list.shift());
     }
   }
