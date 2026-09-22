@@ -1,7 +1,7 @@
 /**
- * Mietrecht News – Backend v5 Final
- * Redis Cache + Push-Notifications + Cron 09:00 Uhr
- * Stand: 2026-03-25d
+ * Miet- & WEG-Recht – Backend v6
+ * Nachrichten aus echten Quellen (RSS + Originallink), Redis Cache, Push, Cron 09:00 Uhr
+ * Stand: 2026-09-22
  */
 
 const express   = require("express");
@@ -9,6 +9,7 @@ const cors      = require("cors");
 const webpush   = require("web-push");
 const cron      = require("node-cron");
 const Anthropic = require("@anthropic-ai/sdk");
+const { fetchCandidates, fetchArticleText } = require("./sources");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -72,6 +73,7 @@ async function redisSet(key, value, ttlSeconds) {
 let cache      = { date: null, news: [], titles: [] };
 let subs       = [];
 let titleHistory = []; // persistente Titelhistorie über mehrere Tage
+let urlHistory   = []; // bereits gemeldete Originallinks – werden nicht erneut ausgewählt
 
 // Beim Start: Cache und Subscriptions aus Redis laden BEVOR Server startet
 async function initFromRedis() {
@@ -93,10 +95,15 @@ async function initFromRedis() {
     }
   }
   // Titelhistorie laden
-  const savedHistory = await redisGet("mietrecht_title_history");
+  const savedHistory = await redisGet("mietrecht_title_history_v2");
   if (savedHistory && Array.isArray(savedHistory)) {
     titleHistory = savedHistory;
     console.log(`[INIT] Titelhistorie: ${titleHistory.length} Einträge geladen ✓`);
+  }
+  const savedUrls = await redisGet("mietrecht_url_history");
+  if (savedUrls && Array.isArray(savedUrls)) {
+    urlHistory = savedUrls;
+    console.log(`[INIT] URL-Historie: ${urlHistory.length} Einträge geladen ✓`);
   }
   // Subscriptions laden
   const savedSubs = await redisGet("mietrecht_subs");
@@ -108,15 +115,20 @@ async function initFromRedis() {
   }
 }
 
-async function saveCache() {
-  await redisSet("mietrecht_cache", cache, 604800); // 7 Tage TTL
-  await redisSet(`mietrecht_archive_${cache.date}`, cache.news, 2592000); // 30 Tage Archiv
+async function saveNews(date, news) {
+  await redisSet(`mietrecht_archive_${date}`, news, 2592000); // 30 Tage Archiv
+  if (date === new Date().toLocaleDateString("sv-SE")) {
+    cache = { date, news, titles: news.map(n => n.titel) };
+    await redisSet("mietrecht_cache", cache, 604800); // 7 Tage TTL
+  }
 }
 
-async function saveTitleHistory(newTitles) {
-  titleHistory = [...titleHistory, ...newTitles].slice(-150); // max. 150 Titel ≈ 30 Tage
-  await redisSet("mietrecht_title_history", titleHistory, 2592000); // 30 Tage TTL
-  console.log(`[HISTORY] ${titleHistory.length} Titel gespeichert.`);
+async function saveHistory(news) {
+  titleHistory = [...titleHistory, ...news.map(n => n.titel)].slice(-150);
+  urlHistory   = [...urlHistory,   ...news.map(n => n.url)].slice(-500);
+  await redisSet("mietrecht_title_history_v2", titleHistory, 2592000); // 30 Tage TTL
+  await redisSet("mietrecht_url_history",   urlHistory,   5184000); // 60 Tage TTL
+  console.log(`[HISTORY] ${titleHistory.length} Titel, ${urlHistory.length} Links gespeichert.`);
 }
 
 async function saveSubs() {
@@ -125,135 +137,133 @@ async function saveSubs() {
 }
 
 function cacheValid(today) {
-  return cache.date === today && cache.news.length > 0;
+  return cache.date === today && hasSources(cache.news);
 }
 
 // ── Hilfsfunktionen ───────────────────────────────────────────────────────────
-function stripTags(val) {
-  if (typeof val !== "string") return val;
-  return val.replace(/<[^>]+>/g, "").trim();
+const KATEGORIEN = ["urteil", "gesetz", "markt", "beratung", "politik"];
+
+function cleanText(val, maxLen) {
+  if (typeof val !== "string") return "";
+  return val.replace(/<[^>]+>/g, "").trim().slice(0, maxLen);
 }
 
-function getKnownTitles() {
-  return titleHistory.slice(-30); // letzte 30 Titel (≈ 6 Tage) an Claude übergeben
+// Meldungen ohne Originallink stammen aus der früheren, quellenlosen Generierung
+function hasSources(news) {
+  return Array.isArray(news) && news.some(n => n && typeof n.url === "string" && n.url.startsWith("http"));
 }
 
-// ── Google News RSS fetchen ───────────────────────────────────────────────────
-async function fetchGoogleNewsRss() {
-  const queries = [
-    "Mietrecht Urteil BGH OLG",
-    "WEG Wohnungseigentumsrecht Urteil",
-    "Miete Kündigung Nebenkosten Urteil"
-  ];
-  const items = [];
-  for (const q of queries) {
-    try {
-      const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=de&gl=DE&ceid=DE:de`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      const text = await res.text();
-      const matches = [...text.matchAll(/<item>[\s\S]*?<title><!\[CDATA\[(.*?)\]\]><\/title>[\s\S]*?<\/item>/g)];
-      for (const m of matches.slice(0, 6)) {
-        const title = m[1].replace(/ - [^-]+$/, "").trim(); // Quellenangabe am Ende entfernen
-        if (!items.find(i => i === title)) items.push(title);
-      }
-    } catch (e) {
-      console.warn("[RSS] Fehler bei Query:", q, e.message);
+function extractJsonArray(text) {
+  const raw = text.replace(/```json|```/g, "").trim();
+  const s = raw.indexOf("[");
+  if (s === -1) return null;
+  let depth = 0, inString = false;
+  for (let i = s; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {                       // Klammern in Texten (z. B. "Urteil [BGH]") nicht zählen
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth === 0) return JSON.parse(raw.slice(s, i + 1));
     }
   }
-  console.log(`[RSS] ${items.length} aktuelle Schlagzeilen geladen`);
-  return items;
+  return null;
 }
 
-// ── News von Claude holen ─────────────────────────────────────────────────────
+// ── News aus echten Quellen erstellen ─────────────────────────────────────────
+// Claude wählt nur aus und fasst zusammen – Link, Quelle und Datum kommen aus dem Feed.
 async function fetchNews(date) {
-  const known = getKnownTitles();
-  const exclusionBlock = known.length > 0
-    ? "\n\nBEREITS BERICHTET (nicht wiederholen):\n"
-      + known.map((t, i) => `${i + 1}. ${t}`).join("\n")
-    : "";
+  const candidates = await fetchCandidates(date, { excludeUrls: new Set(urlHistory) });
+  if (candidates.length === 0) throw new Error("Keine aktuellen Quellen gefunden");
 
-  // Aktuelle Schlagzeilen via RSS holen
-  const rssHeadlines = await fetchGoogleNewsRss();
-  const rssBlock = rssHeadlines.length > 0
-    ? "\n\nAKTUELLE SCHLAGZEILEN AUS GOOGLE NEWS (Stand heute – als Recherchegrundlage nutzen):\n"
-      + rssHeadlines.map((t, i) => `${i + 1}. ${t}`).join("\n")
+  const texts = await Promise.all(candidates.map(c => fetchArticleText(c.link)));
+  const sourceBlock = candidates.map((c, i) =>
+    `[${i + 1}] Quelle: ${c.source} | veröffentlicht: ${c.published.toISOString().slice(0, 10)}\n` +
+    `Titel: ${c.title}\n` +
+    `Text: ${texts[i] || c.description || "(nur Titel verfügbar)"}`
+  ).join("\n\n");
+
+  const recentTitles = titleHistory.slice(-15);
+  const recentBlock = recentTitles.length > 0
+    ? "\n\nKürzlich bereits gemeldet – diese Themen nicht erneut aufgreifen:\n" + recentTitles.map(t => `- ${t}`).join("\n")
     : "";
 
   const systemPrompt =
-    `Du bist Rechtsredakteur für deutsches Mietrecht und Immobilienverwaltung. Erstelle 5 aktuelle Nachrichten (Stand: ${date}) aus VOLLSTÄNDIG UNTERSCHIEDLICHEN Themenbereichen basierend auf den unten gelisteten aktuellen Schlagzeilen. Antworte IMMER mit einem JSON-Array.
+    `Du bist Redakteur der App "Miet- & WEG-Recht" für Vermieter, Mieter, WEG-Verwalter und Eigentümer in Deutschland.
+Du erhältst nummerierte, echte Artikel. Wähle bis zu 5 Artikel aus, die für Mietrecht, WEG-Recht oder Immobilienverwaltung am relevantesten sind, und fasse sie zusammen.
 
-GERICHTSURTEILE (mindestens 3 der 5 Nachrichten):
-Suche aktiv nach Urteilen von: BGH, OLG (alle Bundesländer), LG (alle großen Städte), AG (AG München, AG Berlin-Mitte, AG Hamburg, AG Köln, AG Frankfurt, AG Stuttgart, AG Düsseldorf, AG Leipzig, AG Bremen, AG Hannover, AG Charlottenburg, AG Schöneberg, AG Wedding, AG Tempelhof-Kreuzberg, AG Spandau).
+REGELN:
+- Verwende ausschließlich Informationen aus dem Text des jeweiligen Artikels. Erfinde nichts: keine Aktenzeichen, Daten, Zahlen, Gerichte oder Zitate, die dort nicht stehen.
+- Bevorzuge Gerichtsentscheidungen und Gesetzgebung vor Markt- und Branchenmeldungen, und Primär- und Fachquellen (BGH, Haufe, LTO, beck-aktuell) vor Ratgeber- und Boulevardportalen.
+- Keine zwei Artikel zum selben Thema. Lieber weniger als 5 als unpassende Artikel (Büro-/Gewerbe-Investment, Podcasts, Preisverleihungen, Personalien weglassen).
+- Formuliere eigenständig, übernimm keine Sätze wörtlich.
+- "aktenzeichen" nur, wenn es wörtlich im Artikeltext steht, sonst leerer String.
 
-THEMEN MIETRECHT:
-Kündigung, Kaution, Betriebskosten, Schönheitsreparaturen, Mietminderung, Eigenbedarfskündigung, Nebenkostenabrechnung, Schimmel/Feuchte, Lärmbelästigung, Tierhaltung, Untervermietung, Modernisierungsumlage, Ruhestörung, Wohnungsübergabe/-abnahme, Mietspiegel, Mietpreisbremse, Indexmiete, Staffelmiete.
+Antworte NUR mit einem JSON-Array, ohne Markdown:
+[{"nr":1,"titel":"max. 12 Wörter","zusammenfassung":"2 prägnante Sätze","details":"max. 80 Wörter mit den wichtigsten Fakten","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["Tag1","Tag2"],"aktenzeichen":""}]${recentBlock}`;
 
-THEMEN IMMOBILIENVERWALTUNG & WEG:
-WEG-Recht (Wohnungseigentumsgesetz), Beschlüsse der Eigentümerversammlung, Verwaltervertrag/-abberufung, Hausgeldabrechnungen, Instandhaltungs-/Instandsetzungspflichten, Sondereigentum vs. Gemeinschaftseigentum, Bauliche Veränderungen §20 WEG, Erhaltungsrücklage, Zwangsverwaltung, Sonderumlage, Hausordnung, Verwalter-Haftung, Beirat-Kompetenzen, Beschlussanfechtung, Jahresabrechnung WEG, Wohnungseigentümer-Rechte.
-
-STRIKTE DUPLIKAT-REGELN – HÖCHSTE PRIORITÄT:
-- Kein Thema, kein Gericht, keine Institution darf sich mit den unten gelisteten Titeln überschneiden
-- Auch sinngemäße Wiederholungen sind verboten
-- Jede der 5 Nachrichten MUSS ein anderes Rechtsgebiet UND eine andere Quelle haben
-- Keine allgemeinen Überblicksartikel – nur konkrete Einzelereignisse mit Datum, Aktenzeichen oder Fundstelle
-${rssBlock}${exclusionBlock}
-
-Antworte NUR mit JSON-Array, kein Markdown, keine XML-Tags, keine <cite>-Tags:
-[{"id":"${date}_1","titel":"max 12 Wörter","zusammenfassung":"2 prägnante Sätze mit konkreten Fakten","details":"max 80 Wörter, Aktenzeichen wenn vorhanden","kategorie":"urteil|gesetz|markt|beratung|politik","relevanz":"hoch|mittel","tags":["T1","T2"],"quelle":"Gericht/Institution + Aktenzeichen","url":"https://url-oder-leerer-string","datum":"${date}"}]`;
-
-  console.log(`[${new Date().toISOString()}] API-Aufruf für ${date}...`);
+  console.log(`[${new Date().toISOString()}] API-Aufruf für ${date} mit ${candidates.length} Quellen...`);
 
   const msg = await anthropic.messages.create({
     model:      "claude-haiku-4-5-20251001",
     max_tokens: 3000,
     system:     systemPrompt,
-    messages:   [{ role: "user", content: `5 Mietrecht-Nachrichten ${date} basierend auf den aktuellen Schlagzeilen. Nur JSON.` }]
+    messages:   [{ role: "user", content: `Artikel (Stand ${date}):\n\n${sourceBlock}` }]
   });
-  console.log("[API] OK");
 
   const textBlock = msg.content.find(b => b.type === "text");
   if (!textBlock) throw new Error("Kein Text-Block");
-
-  let raw = textBlock.text.replace(/```json|```/g, "").trim();
-  const s = raw.indexOf("[");
-  let e = -1;
-  if (s !== -1) {
-    let depth = 0;
-    for (let i = s; i < raw.length; i++) {
-      if (raw[i] === "[" || raw[i] === "{") depth++;
-      else if (raw[i] === "]" || raw[i] === "}") {
-        depth--;
-        if (depth === 0 && raw[i] === "]") { e = i; break; }
-      }
-    }
-  }
-  if (s === -1 || e === -1) {
-    console.error("[PARSE] Rohantwort:", raw.slice(0, 500));
+  const parsed = extractJsonArray(textBlock.text);
+  if (!Array.isArray(parsed)) {
+    console.error("[PARSE] Rohantwort:", textBlock.text.slice(0, 500));
     throw new Error("Kein JSON-Array");
   }
-  raw = raw.slice(s, e + 1);
 
-  const parsed = JSON.parse(raw);
-  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Leeres Array");
+  const used = new Set();
+  const news = [];
+  for (const n of parsed) {
+    const idx = Number(n && n.nr) - 1;
+    const c = candidates[idx];
+    if (!c || used.has(idx) || news.length >= 5) continue;
+    used.add(idx);
+    const text = texts[idx] || c.description;
+    const az = cleanText(n.aktenzeichen, 40);
+    news.push({
+      id:              `${date}_${news.length + 1}`,
+      titel:           cleanText(n.titel, 160) || c.title,
+      zusammenfassung: cleanText(n.zusammenfassung, 400),
+      details:         cleanText(n.details, 900),
+      kategorie:       KATEGORIEN.includes(n.kategorie) ? n.kategorie : "markt",
+      relevanz:        n.relevanz === "hoch" ? "hoch" : "mittel",
+      tags:            Array.isArray(n.tags) ? n.tags.slice(0, 4).map(t => cleanText(t, 30)).filter(Boolean) : [],
+      quelle:          az && text.includes(az) ? `${c.source} · ${az}` : c.source,
+      url:             c.link,
+      veroeffentlicht: c.published.toISOString().slice(0, 10),
+      datum:           date,
+      isMock:          false
+    });
+  }
+  if (news.length === 0) throw new Error("Keine verwertbare Auswahl");
 
-  const news = parsed.map((n, i) => ({
-    ...n,
-    titel:           stripTags(n.titel),
-    zusammenfassung: stripTags(n.zusammenfassung),
-    details:         stripTags(n.details),
-    quelle:          stripTags(n.quelle),
-    url:             (typeof n.url === "string" && n.url.startsWith("http")) ? n.url : null,
-    datum:           date,
-    id:              `${date}_${i + 1}`,
-    isMock:          false
-  }));
+  await saveNews(date, news);
+  await saveHistory(news);
 
-  cache = { date, news, titles: news.map(n => n.titel) };
-  await saveCache();
-  await saveTitleHistory(news.map(n => n.titel));
-
-  console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten in Redis gespeichert.`);
+  console.log(`[${new Date().toISOString()}] OK – ${news.length} Nachrichten mit Quelle gespeichert.`);
   return news;
+}
+
+// Parallele Anfragen für denselben Tag teilen sich einen Abruf
+const inflight = new Map();
+function fetchNewsOnce(date) {
+  if (!inflight.has(date)) {
+    inflight.set(date, fetchNews(date).finally(() => inflight.delete(date)));
+  }
+  return inflight.get(date);
 }
 
 // ── Push senden ───────────────────────────────────────────────────────────────
@@ -268,10 +278,10 @@ async function sendPush(news) {
   }
 
   const payload = JSON.stringify({
-    title: "§ Mietrecht News – " + new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "long" }),
+    title: "§ Miet- & WEG-Recht – " + new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "long" }),
     body:  news[0].titel + "\n\nJetzt lesen – Dein CAPERA News-Team",
     icon:  "/icon-192.png",
-    badge: "/icon-192.png",
+    badge: "/badge-96.png",
     tag:   "mietrecht-daily",
     data:  { url: "/" }
   });
@@ -311,7 +321,7 @@ cron.schedule("0 9 * * *", async () => {
   try {
     // Redis nochmal prüfen – falls anderer Prozess bereits geladen hat
     const saved = await redisGet("mietrecht_cache");
-    if (saved && saved.date === today && Array.isArray(saved.news) && saved.news.length > 0) {
+    if (saved && saved.date === today && hasSources(saved.news)) {
       cache = saved;
       console.log("[CRON] Cache aus Redis geladen – sende Push.");
       await sendPush(cache.news);
@@ -319,12 +329,12 @@ cron.schedule("0 9 * * *", async () => {
     }
 
     // Neu laden
-    const news = await fetchNews(today);
+    const news = await fetchNewsOnce(today);
     await sendPush(news);
   } catch (err) {
     console.error("[CRON] Fehler:", err.message);
     // Falls Cache trotzdem gefüllt wurde: Push noch senden
-    if (cache.news.length > 0 && cache.date === today) {
+    if (cacheValid(today)) {
       console.log("[CRON] Sende Push trotz Fehler mit vorhandenem Cache.");
       await sendPush(cache.news);
     }
@@ -356,15 +366,16 @@ async function getNewsForDate(date) {
   // Redis-Archiv prüfen
   const archiveKey = `mietrecht_archive_${date}`;
   const archived   = await redisGet(archiveKey);
-  if (archived && Array.isArray(archived) && archived.length > 0) {
+  // Heute ohne Originallinks (frühere Generierung) → neu erstellen; ältere Tage bleiben unverändert
+  if (Array.isArray(archived) && archived.length > 0 && (date !== today || hasSources(archived))) {
     console.log(`[API] Archiv-Cache Hit für ${date}`);
     if (date === today) cache = { date, news: archived, titles: archived.map(n => n.titel) };
     return { news: archived, cached: true };
   }
 
   // Noch nicht vorhanden → generieren
-  console.log(`[API] Generiere rückwirkend für ${date}...`);
-  const news = await fetchNews(date);
+  console.log(`[API] Generiere für ${date}...`);
+  const news = await fetchNewsOnce(date);
   return { news, cached: false };
 }
 
@@ -410,11 +421,11 @@ app.get("/api/archive", async (req, res) => {
     const d = new Date(new Date(today) - i * msPerDay).toLocaleDateString("sv-SE");
     dates.push(d);
   }
-  // Parallel prüfen welche Daten in Redis vorhanden sind
+  // Parallel prüfen welche Tage Nachrichten mit Originallink haben
   const checks = await Promise.all(
     dates.map(async d => {
       const data = await redisGet(`mietrecht_archive_${d}`);
-      return data && Array.isArray(data) && data.length > 0 ? d : null;
+      return hasSources(data) ? d : null;
     })
   );
   res.json({ available: checks.filter(Boolean) });
@@ -460,7 +471,7 @@ app.get("/health", (req, res) => {
 // Server erst starten nachdem Redis geladen ist
 initFromRedis().then(() => {
   app.listen(PORT, () => {
-    console.log(`Mietrecht News Backend v5 auf Port ${PORT}`);
+    console.log(`Miet- & WEG-Recht Backend v6 auf Port ${PORT}`);
     console.log(`API-Key:  ${process.env.ANTHROPIC_API_KEY ? "✓" : "✗ FEHLT"}`);
     console.log(`Redis:    ${(REDIS_URL && REDIS_TOKEN) ? "✓ konfiguriert" : "✗ FEHLT"}`);
     console.log(`VAPID:    ${VAPID_PUBLIC ? "✓" : "✗ FEHLT – Push deaktiviert"}`);
@@ -470,6 +481,6 @@ initFromRedis().then(() => {
   console.error("[INIT] Fehler beim Start:", err.message);
   // Server trotzdem starten
   app.listen(PORT, () => {
-    console.log(`Mietrecht News Backend v5 auf Port ${PORT} (ohne Redis-Init)`);
+    console.log(`Miet- & WEG-Recht Backend v6 auf Port ${PORT} (ohne Redis-Init)`);
   });
 });
